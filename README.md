@@ -1,171 +1,88 @@
-# Megu Threads Scrape
+# bebenang — Threads profile intelligence
 
-Projek Python untuk monitor public Threads account: followers, posts, engagement, breakout post, dan dashboard local.
+CLI, Streamlit dashboard, and Telegram bot for monitoring public [Threads](https://www.threads.com) profiles: followers, post engagement, account scoring, and hook analysis. ("Bebenang" plays on *benang*, Bahasa Melayu for "thread".)
 
-## Architecture — swappable ingestion provider
+## What it does
 
-Keyword search doesn't call the Apify actor directly. It sits behind an `IngestionProvider` protocol (`threads_intel/ingestion/__init__.py`), and `get_provider()` picks the implementation from `INGESTION_PROVIDER` in config. Today that's `ApifyProvider`, backed by the `automation-lab/threads-scraper` actor — chosen so I don't have to maintain a Threads browser-automation stack myself. Swapping in a different source (a self-hosted scraper, another vendor) means implementing one method, `ingest_keyword()`; the pipeline, storage, alerts, and dashboard never change.
+Give it a public Threads username and it fetches the profile page, parses the embedded JSON out of the HTML, and stores a snapshot (followers + latest posts with likes/replies/reposts/quotes) in SQLite. On top of that data it computes:
 
-```mermaid
-flowchart LR
-    KW[keyword] --> PROVIDER["IngestionProvider protocol\n(ApifyProvider today)"]
-    PROVIDER --> ACTOR["Apify actor\nautomation-lab/threads-scraper"]
-    ACTOR --> MAPPER["apify_mapper.py\ndataset -> KeywordHitPost"]
-    MAPPER --> PIPELINE[storage + alerts + trending]
-    PIPELINE --> DB[(SQLite)]
-    DB --> DASH[Streamlit dashboard]
-```
+- **Engagement rate** per post and account averages
+- **Account score (0–100)** across four signals: engagement, conversation ratio, posting consistency, and format variety — with a plain-language diagnosis
+- **Hook classification** (Bold Claim, Personal Story, Curiosity Question, Specific Number, Observation) and psychological trigger tags, tuned for mixed Malay/English post text
+- **Topic clusters** and **best posting hours** (Asia/Kuala_Lumpur)
+- **Breakout detection** and new-posts-since-last-fetch diffs
 
-## Cara install di Linux Mint
+Fetching tries plain HTTP (httpx) first, then falls back to a headless Chromium render via Playwright when the static HTML isn't enough. Because snapshots are versioned in SQLite, repeated fetches build a follower/engagement history per account.
+
+## Quick start
+
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-sudo apt update
-sudo apt install -y python3 python3-venv git curl sqlite3
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source ~/.bashrc
-
-cd ~
-unzip bebenang_intel.zip
-cd bebenang_intel
+git clone https://github.com/ahmadafif5321/Thread_Scrapper.git
+cd Thread_Scrapper
 uv sync
-cp .env.example .env
+uv run playwright install chromium   # for the browser fallback
+cp .env.example .env                 # defaults work; tokens optional
 ```
 
-> **Quick start note:** profile monitoring (`fetch` / `summary` / Telegram bot) works with just the steps above. Keyword search needs one more thing — an `APIFY_TOKEN` in `.env` — see [Keyword search (Apify)](#keyword-search-apify) below.
-
-## Run CLI
+### CLI
 
 ```bash
-uv run bebenang fetch akmalrahim --limit 20
-uv run bebenang fetch mydinmalaysia --limit 20
-uv run bebenang list akmalrahim
-uv run bebenang summary akmalrahim
+uv run bebenang fetch someusername --limit 20   # fetch and store a snapshot
+uv run bebenang list someusername               # table of stored posts
+uv run bebenang summary someusername            # score, diagnosis, top hooks
 ```
 
-## Run dashboard
+### Dashboard
 
 ```bash
 uv run streamlit run threads_intel/dashboard.py
 ```
 
-Buka URL yang Streamlit beri, biasanya `http://localhost:8501`.
+Fetch accounts from the sidebar, then explore account comparison, history charts, topic clusters, best posting time, top hooks, and per-post tables.
 
-## Hantar summary ke Telegram
+### Telegram bot (optional)
 
-1. Create bot di BotFather.
-2. Masukkan token dan chat id dalam `.env`.
-3. Run:
+Set `TELEGRAM_BOT_TOKEN` (from BotFather) and `TELEGRAM_CHAT_ID` in `.env`, then:
 
 ```bash
-uv run bebenang telegram-summary akmalrahim
+uv run bebenang telegram-summary someusername   # one-off summary push
+uv run bebenang telegram-bot                    # interactive long-polling bot
 ```
 
-## Telegram bot interaktif
+The bot accepts a bare username, a `threads.com/@user` URL, or `/fetch`, `/summary`, and `/analyze` commands.
 
-Masukkan secret dalam `.env`:
+### AI analysis (optional)
 
-```env
-TELEGRAM_BOT_TOKEN=token_dari_botfather
-OPENAI_API_KEY=optional_untuk_ai_analysis
-OPENAI_MODEL=gpt-5.4-mini
+With `OPENAI_API_KEY` set in `.env`, the dashboard and the bot's `/analyze` command send the account summary and top posts to the OpenAI Responses API for a content-strategy write-up and hook rewrite suggestions. Everything else works without it.
+
+## Tech stack
+
+- **Python 3.11+**, packaged with **uv** (`bebenang` console script via Typer)
+- **httpx** + **Playwright** (Chromium) for fetching, **BeautifulSoup** for HTML/JSON extraction
+- **Pydantic** models, **SQLite** storage
+- **Streamlit** + **pandas** dashboard, **Rich** CLI tables
+- Telegram Bot API and OpenAI Responses API called directly over HTTP — no heavy SDK dependencies
+
+## Project layout
+
+```
+threads_intel/
+  fetcher.py       # httpx-first fetch with Playwright fallback
+  parser.py        # extract profile/posts from embedded page JSON
+  analytics.py     # ER, account score, hooks, triggers, topics, timing
+  storage.py       # SQLite snapshots, history, diffs
+  cli.py           # Typer commands
+  dashboard.py     # Streamlit app
+  telegram_bot.py  # long-polling bot
+  ai_analysis.py   # optional OpenAI-backed analysis
 ```
 
-Run bot:
+## Limitations and fair use
 
-```bash
-uv run bebenang telegram-bot
-```
+This reads **public profile pages only** — no login, no captcha bypass. Requests are rate-limited via a configurable delay. Threads' page structure changes over time, so the parser may need patching when Meta ships updates. Don't use this to monitor private accounts or harass anyone.
 
-Dalam Telegram, hantar salah satu:
+---
 
-```text
-ahmadafif5321
-https://www.threads.com/@ahmadafif5321
-/fetch ahmadafif5321
-/summary ahmadafif5321
-/analyze ahmadafif5321
-```
-
-Bot akan fetch profile, simpan data, dan balas score, details engagement, top 3 hooks, serta link Threads. `/analyze` perlukan `OPENAI_API_KEY`.
-
-## Keyword search (Apify)
-
-Keyword ingestion guna [automation-lab/threads-scraper](https://apify.com/automation-lab/threads-scraper) Apify actor.
-
-Setup:
-1. Buat akaun di [apify.com](https://apify.com) dan dapat API token dari console.
-2. Masukkan token dalam `.env`:
-
-```env
-APIFY_TOKEN=apify_api_xxxxxxxxxxxx
-APIFY_ACTOR_ID=automation-lab/threads-scraper
-INGESTION_PROVIDER=apify
-SEARCH_KEYWORDS=ai,malaysia,startup
-```
-
-Run keyword search:
-
-```bash
-uv run bebenang search "artificial intelligence" --target 500
-uv run bebenang keyword-report "artificial intelligence"
-```
-
-Run semua keywords sekaligus (ingestion + alerts):
-
-```bash
-uv run bebenang search-cron
-```
-
-Keyword tab dalam dashboard (`uv run streamlit run threads_intel/dashboard.py`) menunjukkan trend series, viral hooks, influencer ranking, dan coverage/budget status.
-
-**Nota vendor:** `automation-lab/threads-scraper` adalah third-party Apify actor. Semak Terms of Service actor dan polisi Apify sebelum guna dalam production. Field mapping dalam `apify_mapper.py` perlu disahkan dengan satu sample run sebenar (lihat TODO dalam fail tersebut).
-
-## Telegram bot — keyword command
-
-Bot interaktif menyokong command `/keyword`:
-
-```text
-/keyword artificial intelligence
-/keyword malaysia
-```
-
-Bot akan balas dengan top viral hooks, trend series (3 run terkini), dan top influencers untuk keyword tersebut.
-
-## Alerts
-
-Alert rules disimpan dalam `alert_rules` table. Dua condition disokong:
-
-- `volume_spike` — fire bila latest run volume >= X% di atas prior window average
-- `breakout` — fire bila total engagement dalam latest run >= threshold
-
-Alert dihantar ke Telegram via `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`. Alerts dievaluate secara automatik selepas setiap `search-cron` run.
-
-## Cron harian contoh
-
-```bash
-crontab -e
-```
-
-Tambah (profile fetch):
-
-```cron
-0 8 * * * cd /home/$USER/bebenang_intel && uv run bebenang fetch akmalrahim --limit 30 && uv run bebenang telegram-summary akmalrahim
-```
-
-Tambah (keyword ingestion + alerts, setiap 6 jam):
-
-```cron
-0 */6 * * * cd /home/$USER/bebenang_intel && uv run bebenang search-cron
-```
-
-Atau guna Python scheduler secara terus:
-
-```cron
-0 */6 * * * cd /home/$USER/bebenang_intel && uv run python -m threads_intel.scheduler
-```
-
-## Nota penting
-
-Scraper ini baca data public page sahaja. Jangan guna untuk private account, jangan spam request, jangan bypass login/captcha, dan jangan gunakan data untuk ganggu orang. Public web structure Threads boleh berubah; kalau Meta ubah HTML/JSON, parser perlu patch.
-
-`APIFY_TOKEN` mengandungi credentials — jangan commit ke git. Fail `.env` sudah dalam `.gitignore`.
+Built by [Ahmad Afif](https://ahmadafif.com) ([@ahmadafif5321](https://github.com/ahmadafif5321)).
